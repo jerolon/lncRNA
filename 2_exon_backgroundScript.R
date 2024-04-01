@@ -6,7 +6,7 @@ directorio <- here()
 
 
 # load data ---------------------------------------------------------------
-#exones intrones
+#exones intrones, inferidos desde trinotate supertranscripts
 gtf_trinity_exons <- read_delim(paste0(directorio,"/data/gtf_trinity_exons.csv"), 
                                 delim = "\t", escape_double = FALSE, 
                                 col_types = cols(exon_start = col_integer(), 
@@ -57,6 +57,7 @@ rfam <- rfam %>% group_by(transcript_id) %>% filter(row_number(desc((rfam_evalue
 
 
 #get the number of exons per transcript
+#
 gtf_trinity_exons <- gtf_trinity_exons %>% group_by(transcript_id) %>% mutate(number_of_exons = n(), exon_length = (1 + exon_end - exon_start), mean_exon_length = mean(exon_length)) %>%
   ungroup() %>% group_by(gene_id) %>% mutate(n_isoforms = n_distinct(transcript_id), gene_length = max(exon_end)) 
 
@@ -71,11 +72,14 @@ gtf_trinity_transcripts <- gtf_trinity_exons %>% ungroup() %>% group_by(transcri
             ) %>% ungroup() %>% group_by(gene_id) %>% mutate(all_isoforms = sum(transcript_length), 
                                                              coverage = all_isoforms/(n_isoforms*gene_length))
 
+#join with transcript-level classification: non-coding, swissprot, etc..
 gtf_trinity_transcripts <- inner_join(transcript_classification, gtf_trinity_transcripts) %>% 
   select(transcript_id, gene_id, rna_type, rna_type_2, rna_type_joint, total_length, transcript_length, gene_length, mean_exon_length, number_of_exons, coverage)
 
+#join with RNA-seq data from amputation experiments
 gtf_trinity_transcripts <- select(results_full_amp_degs, transcript_id, baseMean, log2FoldChange, padj) %>% right_join(gtf_trinity_transcripts)
 
+#join with strandedness info
 gtf_trinity_transcripts <- left_join(gtf_trinity_transcripts,ss_analysisAMP)
 
 
@@ -84,6 +88,7 @@ gtf_trinity_transcripts <- left_join(gtf_trinity_transcripts,ss_analysisAMP)
 
 consolidated_transcript_df <- inner_join(gtf_trinity_transcripts, StrandedAssGCcontent)
 
+#join with the blast data for conservation compared to invadens and reticulatum transcriptomes
 consolidated_transcript <- Dinv_CNS_match_Dlaeve %>% transmute(transcript_id = qseqid, cons = 100 * length /qlen) %>%
   group_by(transcript_id) %>% summarise(Invadens_conservation = max(cons)) %>% 
   right_join(consolidated_transcript_df)
@@ -93,14 +98,21 @@ consolidated_transcript <- Dret_CNS_match_Dlaeve %>% transmute(transcript_id = q
   group_by(transcript_id) %>% summarise(Reticulatum_conservation = max(cons)) %>% 
   right_join(consolidated_transcript)
 
+#NAs can be interpreted as zero conservation
 consolidated_transcript <- consolidated_transcript %>% replace_na(list(Reticulatum_conservation = 0, Invadens_conservation = 0))
 
 consolidated_transcript <- left_join(consolidated_transcript, rfam)
 
 consolidated_transcript <- consolidated_transcript %>% mutate(rna_type_2 = coalesce(rna_type_2, nonCodingtype))
 
+#Load the maker annotation data
+exonByTxMaker <- read_csv("data/exonByTx.csv", 
+                          col_types = cols(n_exons = col_integer(), 
+                                           fivep = col_integer(), threep = col_integer()))
+exonByTxMaker <- separate(exonByTxMaker, col = Trinity, sep = "to ", into = c("trash", "transcript_id")) 
+exonByTxMaker$trash <- NULL
 
-
+exonByTxMaker <- exonByTxMaker %>% select(transcript_id, exons, fivep, threep, n_exons, Swissprot) %>% left_join(consolidated_transcript)
 # Dimensionality reduction and clustering ---------------------------------
 ############# Dimensionality reduction experiments
 matKmeans <- consolidated_transcript %>% 
@@ -127,20 +139,6 @@ parallel_df$cluster <- rownames(parallel_df)
 parallel_df <- clean_names(parallel_df)
 
 # Save dataframe ----------------------------------------------------------
-write_csv(consolidated_transcript, "transcriptome_consolidated.csv")
-
-
-
-data_donut <- gtf_trinity_transcripts %>% filter(baseMean != 0, abs(diff_ratio) > 0.75, mean_exon_length > 20, coverage > 0.4) %>% ungroup %>% group_by(rna_type) %>%
-  summarise(rna_type = unique(rna_type), number = n()) %>%
-  mutate(category = case_match(rna_type, "Nonsense" ~ "Nonsense", "nonCoding" ~ "Non coding", .default = "Peptide"), label = paste0(category, "\n n = ", number), ymax = cumsum(number), ymin = lag(ymax, default = 0))
-
-gtf_trinity_transcripts <- left_join(gtf_trinity_transcripts,ss_analysisAMP)
-
-gtf_trinity_transcripts %>% ggplot(aes(n_exons)) + geom_histogram() + scale_x_log10()
-
-gtf_trinity_transcripts %>% ggplot(aes(n_exons)) + geom_histogram(binwidth = 1)
-
-inner_join(transcript_classification, gtf_trinity_transcripts)
-
+write_csv(consolidated_transcript, "data/transcriptome_consolidated.csv")
+write_csv(exonByTxMaker, "data/maker_exons.csv")
 
